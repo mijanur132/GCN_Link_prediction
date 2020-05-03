@@ -141,7 +141,7 @@ adj_test_corrupted, test_false_edges, test_false_non_edges = corrupt_adj(adj_tes
 
 
 num_neurons = 256
-input_rep = data.num_features
+input_rep = data.num_features+1
 
 print(input_rep)
 
@@ -156,54 +156,63 @@ class JointGNN(nn.Module):
 
         self.GNN_layer1 = GNNlayer(input_rep, num_neurons)
         self.GNN_layer2 = GNNlayer(num_neurons, num_neurons)
-
-        self.linear1 = nn.Linear(input_rep , input_rep )
-        self.linear2 = nn.Linear(input_rep , 2)
-
+        self.linear1 = nn.Linear(num_neurons , num_neurons )
+        self.linear2 = nn.Linear(num_neurons, num_neurons)
+        self.linear3 = nn.Linear(num_neurons , 2)
         self.relu = nn.ReLU()
         self.sigmoid = nn.Sigmoid()
 
-    def forward(self, x_feature, graph, samples, edges):
-        # print("graphs: ", graph)
-        x = x_feature
-        x = self.GNN_layer1(x, graph.edge_index)
-        x = self.relu(x)
-
-        x = self.GNN_layer2(x, graph.edge_index)
-        x = self.relu(x)
-        # print("x",x)
-
-        z_tensor = torch.zeros((len(samples), input_rep )).to(device)
-
-        link_no = 0
-        for e_index in range(len(samples)):
-            u = samples[e_index][0]
-            v = samples[e_index][1]
-            # print("u and v:",u,v)
+    def forward(self, x_features, graph, batch_edges):
+        z_tensor = torch.zeros((len(batch_edges), num_neurons)).to(device)
+        for e_index in range(len(batch_edges)):
+            #print("e_index",e_index)
+            edge=batch_edges[e_index]
+            #print("forward xfeature",x_features.shape[0])
+            x_avg = torch.zeros(x_features.shape[0],num_neurons)
+            #print("xavg",x_avg.size())
+            for i in range(2):
+                column=torch.zeros(x_features.shape[0],1)
+                column[edge[i]]=1
+                x= torch.cat((x_features, column), dim=1).to(device)
+                #print("xf n x",x_features.shape[0], x.size())
+                x = self.GNN_layer1(x, graph.edge_index)
+                x = self.relu(x)
+                x = self.GNN_layer2(x, graph.edge_index)
+                x = self.relu(x)
+                #print("x",x.size())
+                x_avg+=x
+            x_avg=x_avg/2
+            u = x_avg[edge[0]]
+            v = x_avg[edge[1]]
+          #  print(edge[0], edge[1])
+           # print("u and v:",u.size(),v.size())
             # print("x_feature[u]:",x_feature[u], x_feature[u].size())
             # print("x_feature[v]:", x_feature[v],x_feature[v].size())
-            z = torch.mul(x_feature[u], x_feature[v])
-            # print("z", z)
-            z_tensor[link_no, :] = z
-            link_no += 1
+            z = u*v
+            z_tensor[e_index, :] = z
 
-        print("ztensor size: ", z_tensor.size())
+
+       # print("ztensor size: ", z_tensor.size())
         # One Hidden Layer for predictor
         z_tensor = self.linear1(z_tensor)
         z_tensor = self.relu(z_tensor)
         z_tensor = self.linear2(z_tensor)
-        # print("z_tensor final:", z_tensor)
+        z_tensor = self.relu(z_tensor)
+        z_tensor = self.linear3(z_tensor)
+       # print("z_tensor final:", z_tensor)
         return z_tensor
 
-    def compute_loss(self, x_feature, graph, edge_index, samples, target):
-        pred = self.forward(x_feature, graph, samples, edge_index)
+    def compute_loss(self, x_feature, graph, edge_index, target):
+        pred = self.forward(x_feature, graph, batch_edges)
         return F.cross_entropy(pred, target)
 
-    def predict(self, x_feature, graph, edges, samples, target):
-        pred = self.forward(x_feature, graph, samples, edge_index)
-        # print("predSize:",pred.size())
-        # print("targetSize:",target.size())
-        # print("target:",target)
+  #  model.predict(v_x_feature, G_x, edge_index_x, true_target)
+    def predict(self, x_feature, graph, batch_edges, target):
+        #print("predict x size",x_feature.size())
+        pred = self.forward(x_feature, graph, batch_edges)
+        #print("predSize:",pred.size())
+        #print("targetSize:",target.size())
+        #print("target:",target)
         loss = F.cross_entropy(pred, target)
 
         return loss, pred
@@ -241,29 +250,29 @@ def sample_equal_number_edges_non_edges(adj_mat, false_non_edges, false_edges, s
 # In[ ]:
 
 
-# class MiniBatcher(object):
-#     def __init__(self, batch_size, n_examples, shuffle=True):
-#         assert batch_size <= n_examples, "Error: batch_size is larger than n_examples"
-#         self.batch_size = batch_size
-#         self.n_examples = n_examples
-#         self.shuffle = shuffle
-#         logging.info("batch_size={}, n_examples={}".format(batch_size, n_examples))
-#
-#         self.idxs = np.arange(self.n_examples)
-#         if self.shuffle:
-#             np.random.shuffle(self.idxs)
-#         self.current_start = 0
-#
-#     def get_one_batch(self):
-#         self.idxs = np.arange(self.n_examples)
-#         if self.shuffle:
-#             np.random.shuffle(self.idxs)
-#         self.current_start = 0
-#         while self.current_start < self.n_examples:
-#             batch_idxs = self.idxs[self.current_start:self.current_start + self.batch_size]
-#             self.current_start += self.batch_size
-#             yield torch.LongTensor(batch_idxs)
-#
+class MiniBatcher(object):
+    def __init__(self, batch_size, n_examples, shuffle=True):
+        assert batch_size <= n_examples, "Error: batch_size is larger than n_examples"
+        self.batch_size = batch_size
+        self.n_examples = n_examples
+        self.shuffle = shuffle
+        logging.info("batch_size={}, n_examples={}".format(batch_size, n_examples))
+
+        self.idxs = np.arange(self.n_examples)
+        if self.shuffle:
+            np.random.shuffle(self.idxs)
+        self.current_start = 0
+
+    def get_one_batch(self):
+        self.idxs = np.arange(self.n_examples)
+        if self.shuffle:
+            np.random.shuffle(self.idxs)
+        self.current_start = 0
+        while self.current_start < self.n_examples:
+            batch_idxs = self.idxs[self.current_start:self.current_start + self.batch_size]
+            self.current_start += self.batch_size
+            yield torch.LongTensor(batch_idxs)
+
 
 # ## Prediction
 
@@ -280,17 +289,20 @@ def predict_model(model, G_x, small_samples, adj_corrupted, false_non_edges, fal
     true_target = torch.cat((torch.ones(len(edges)), torch.zeros(len(non_edges))), dim=0).type(torch.long).to(device)
     t_start = time.time()
 
+
     with torch.no_grad():
-        x_feature, edge_index_x = G_x.x, G_x.edge_index
-        loss, pred = model.predict(x_feature, G_x, edge_index_x, samples, true_target)
+        v_x_feature, edge_index_x = G_x.x, G_x.edge_index
+        print("val x size", v_x_feature.size())
+        print("true target size", samples.size(),true_target.size())
+        loss, pred = model.predict(v_x_feature, G_x, samples, true_target)
         total_loss += loss.item()
 
         pred = F.log_softmax(pred, dim=1)
-        pred = pred.detach().to("cpu").numpy()
+        pred = pred.detach().to(device).numpy()
         pred = np.argmax(pred, axis=1)
 
         preds = np.append(preds, pred)
-        targets = np.append(targets, true_target.detach().to("cpu").numpy())
+        targets = np.append(targets, true_target.detach().to(device).numpy())
 
     micro = f1_score(targets, preds, average='micro')
     weighted = f1_score(targets, preds, average='weighted')
@@ -339,6 +351,7 @@ gnn_best_model = 'best_gnn_inductive_model.model'
 epochs = 50
 validation_acc = 0
 small_samples = 200
+minibatch_size=100
 
 G_train = Data(edge_index=(adj_train_corrupted.nonzero()).t(), x=data.x[data.train_mask])
 G_val = Data(edge_index=(adj_val_corrupted.nonzero()).t(), x=data.x[data.val_mask])
@@ -357,28 +370,36 @@ for num_epoch in range(epochs):
     samples = torch.cat((torch.Tensor(edges), torch.Tensor(non_edges)), dim=0).type(torch.long).to(device)
     target = torch.cat((torch.ones(len(edges)), torch.zeros(len(non_edges))), dim=0).type(torch.long).to(device)
 
+    train_batcher = MiniBatcher(minibatch_size, len(samples)) if minibatch_size > 0 else MiniBatcher(len(samples),
+                                                                                                     len(samples))
+
     train_loss = 0
     y_pred = []
     y_true = []
-
     t_start = time.time()
+    for train_idxs in train_batcher.get_one_batch():
+        train_idxs = train_idxs.to(device)
+        train_b_edges = samples[train_idxs]
+        train_b_target = target[train_idxs]
 
-    x_feature, edge_index = G_train.x, G_train.edge_index
-    gnn_optimizer.zero_grad()
-    # print("graph edgeindex: ",edge_index)
-    loss, pred = gnn_model.predict(x_feature, G_train, edge_index, samples, target)
 
-    loss.backward()
-    gnn_optimizer.step()
+        x_feature, edge_index = G_train.x, G_train.edge_index
+      #  print("x_feature:", x_feature, x_feature.size())
+        gnn_optimizer.zero_grad()
+        # print("graph edgeindex: ",edge_index)
+        loss, pred = gnn_model.predict(x_feature, G_train, train_b_edges, train_b_target)
 
-    train_loss += loss.item()
+        loss.backward()
+        gnn_optimizer.step()
 
-    pred = F.log_softmax(pred, dim=1)
-    pred = pred.detach().to("cpu").numpy()
-    pred = np.argmax(pred, axis=1)
+        train_loss += loss.item()
 
-    y_pred = np.append(y_pred, pred)
-    y_true = np.append(y_true, target.detach().to("cpu").numpy())
+        pred = F.log_softmax(pred, dim=1)
+        pred = pred.detach().to(device).numpy()
+        pred = np.argmax(pred, axis=1)
+
+        y_pred = np.append(y_pred, pred)
+        y_true = np.append(y_true, train_b_target.detach().to(device).numpy())
 
     t_end = time.time()
     print("Minibatch time: ", t_end - t_start)
@@ -387,7 +408,7 @@ for num_epoch in range(epochs):
     train_accs.append(train_acc)
     train_losses.append(train_loss)
 
-    print("............................................", num_epoch, train_acc)
+   # print("............................................", num_epoch, train_acc)
 
     val_loss, val_acc, _, _ = predict_model(gnn_model, G_val, small_samples, adj_val_corrupted, val_false_non_edges,
                                             val_false_edges)
