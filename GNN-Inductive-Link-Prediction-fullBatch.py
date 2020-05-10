@@ -23,22 +23,21 @@ from torch_geometric.data import Data
 import logging
 import time
 from torch_geometric.nn import GCNConv, GATConv, SAGEConv, GINConv
-
 # ## Define the dataset, the type of prediction and the number of samples
 
 # In[ ]:
-
 
 parser = argparse.ArgumentParser(description='GNN experiment')
 parser.add_argument('-d', '--ds',  default='cora',
                     help='dataset (DEFAULT: cora)')
 parser.add_argument('-e', '--epochs', type=int, default=20,
                     help='number of epochs (DEFAULT: 20)')
-parser.add_argument('-m', '--minibatch_size', type=int, default=100,
-                    help='minibatch_size. less than 400. (DEFAULT: 100)')
+parser.add_argument('-m', '--minibatch_size', type=int,
+                    help='This is fullbatch')
 parser.add_argument('-model', '--model', default='GCNConv',
                     help='GCNConv, GATConv, SAGEConv')
 args = parser.parse_args()
+
 
 
 DATASET = args.ds
@@ -59,11 +58,11 @@ dataset = datasets[DATASET]
 data = dataset[0]
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# print(device)
-#
-# # In[ ]:
-#
-#
+print(device)
+
+# In[ ]:
+
+
 print("Printing Dataset Characteristics")
 print("Name: ", DATASET)
 print("Total Number of Nodes: ", data.num_nodes)
@@ -153,9 +152,10 @@ adj_test_corrupted, test_false_edges, test_false_non_edges = corrupt_adj(adj_tes
 
 
 num_neurons = 256
-input_rep = data.num_features+1
+input_rep = data.num_features
 
-# print(input_rep)
+#print(input_rep)
+
 
 if(args.model=='gcn'):
         GNNlayer = GCNConv
@@ -172,64 +172,54 @@ class JointGNN(nn.Module):
 
         self.GNN_layer1 = GNNlayer(input_rep, num_neurons)
         self.GNN_layer2 = GNNlayer(num_neurons, num_neurons)
-        self.linear1 = nn.Linear(num_neurons , num_neurons )
-        self.linear2 = nn.Linear(num_neurons, num_neurons)
-        self.linear3 = nn.Linear(num_neurons , 2)
+
+        self.linear1 = nn.Linear(input_rep, input_rep)
+        self.linear2 = nn.Linear(input_rep, 2)
+
         self.relu = nn.ReLU()
         self.sigmoid = nn.Sigmoid()
 
-    def forward(self, x_features, graph, batch_edges):
-        z_tensor = torch.zeros((len(batch_edges), num_neurons)).to(device)
-        for e_index in range(len(batch_edges)):
-            #print("e_index",e_index)
-            edge=batch_edges[e_index]
-            #print("forward xfeature",x_features.shape[0])
-            x_avg = torch.zeros(x_features.shape[0],num_neurons).to(device)
-            #print("xavg",x_avg.size())
-            for i in range(2):
-                column=torch.zeros(x_features.shape[0],1)
-                column[edge[i]]=1
-                column=column.to(device)
-                x= torch.cat((x_features, column), dim=1).to(device)
-                #print("xf n x",x_features.shape[0], x.size())
-                x = self.GNN_layer1(x, graph.edge_index)
-                x = self.relu(x)
-                x = self.GNN_layer2(x, graph.edge_index)
-                x = self.relu(x)
-                #print("x",x.size())
-                x_avg+=x
-            x_avg=x_avg/2
-            u = x_avg[edge[0]]
-            v = x_avg[edge[1]]
-          #  print(edge[0], edge[1])
-           # print("u and v:",u.size(),v.size())
+    def forward(self, x_feature, graph, samples, edges):
+        # print("graphs: ", graph)
+        x = x_feature
+        x = self.GNN_layer1(x, graph.edge_index)
+        x = self.relu(x)
+
+        x = self.GNN_layer2(x, graph.edge_index)
+        x = self.relu(x)
+        # print("x",x)
+
+        z_tensor = torch.zeros((len(samples), input_rep)).to(device)
+
+        link_no = 0
+        for e_index in range(len(samples)):
+            u = samples[e_index][0]
+            v = samples[e_index][1]
+            # print("u and v:",u,v)
             # print("x_feature[u]:",x_feature[u], x_feature[u].size())
             # print("x_feature[v]:", x_feature[v],x_feature[v].size())
-            z = u*v
-            z_tensor[e_index, :] = z
+            z = torch.mul(x_feature[u], x_feature[v])
+            # print("z", z)
+            z_tensor[link_no, :] = z
+            link_no += 1
 
-
-       # print("ztensor size: ", z_tensor.size())
+        print("ztensor size: ", z_tensor.size())
         # One Hidden Layer for predictor
         z_tensor = self.linear1(z_tensor)
         z_tensor = self.relu(z_tensor)
         z_tensor = self.linear2(z_tensor)
-        z_tensor = self.relu(z_tensor)
-        z_tensor = self.linear3(z_tensor)
-       # print("z_tensor final:", z_tensor)
+        # print("z_tensor final:", z_tensor)
         return z_tensor
 
-    def compute_loss(self, x_feature, graph, edge_index, target):
-        pred = self.forward(x_feature, graph, batch_edges)
+    def compute_loss(self, x_feature, graph, edge_index, samples, target):
+        pred = self.forward(x_feature, graph, samples, edge_index)
         return F.cross_entropy(pred, target)
 
-  #  model.predict(v_x_feature, G_x, edge_index_x, true_target)
-    def predict(self, x_feature, graph, batch_edges, target):
-        #print("predict x size",x_feature.size())
-        pred = self.forward(x_feature, graph, batch_edges)
-        #print("predSize:",pred.size())
-        #print("targetSize:",target.size())
-        #print("target:",target)
+    def predict(self, x_feature, graph, edges, samples, target):
+        pred = self.forward(x_feature, graph, samples, edge_index)
+        # print("predSize:",pred.size())
+        # print("targetSize:",target.size())
+        # print("target:",target)
         loss = F.cross_entropy(pred, target)
 
         return loss, pred
@@ -306,12 +296,9 @@ def predict_model(model, G_x, small_samples, adj_corrupted, false_non_edges, fal
     true_target = torch.cat((torch.ones(len(edges)), torch.zeros(len(non_edges))), dim=0).type(torch.long).to(device)
     t_start = time.time()
 
-
     with torch.no_grad():
-        v_x_feature, edge_index_x = G_x.x, G_x.edge_index
-        #print("val x size", v_x_feature.size())
-       # print("true target size", samples.size(),true_target.size())
-        loss, pred = model.predict(v_x_feature, G_x, samples, true_target)
+        x_feature, edge_index_x = G_x.x, G_x.edge_index
+        loss, pred = model.predict(x_feature, G_x, edge_index_x, samples, true_target)
         total_loss += loss.item()
 
         pred = F.log_softmax(pred, dim=1)
@@ -325,7 +312,9 @@ def predict_model(model, G_x, small_samples, adj_corrupted, false_non_edges, fal
     weighted = f1_score(targets, preds, average='weighted')
     acc = accuracy_score(targets, preds)
 
-    #print("Micro F1 Score: ", micro, "Weighted F1 Score: ", weighted,"Accuracy Score: ", acc)
+    print("Micro F1 Score: ", micro)
+    print("Weighted F1 Score: ", weighted)
+    print("Accuracy Score: ", acc)
 
     return total_loss, acc, micro, weighted
 
@@ -366,11 +355,14 @@ gnn_best_model = 'best_gnn_inductive_model.model'
 epochs = args.epochs
 validation_acc = 0
 small_samples = 200
-minibatch_size=args.minibatch_size
 
-G_train = Data(edge_index=(adj_train_corrupted.nonzero()).t(), x=data.x[data.train_mask]).to(device)
-G_val = Data(edge_index=(adj_val_corrupted.nonzero()).t(), x=data.x[data.val_mask]).to(device)
-G_test = Data(edge_index=(adj_test_corrupted.nonzero()).t(), x=data.x[data.test_mask]).to(device)
+G_train = Data(edge_index=(adj_train_corrupted.nonzero()).t(), x=data.x[data.train_mask])
+G_val = Data(edge_index=(adj_val_corrupted.nonzero()).t(), x=data.x[data.val_mask])
+G_test = Data(edge_index=(adj_test_corrupted.nonzero()).t(), x=data.x[data.test_mask])
+
+G_train=G_train.to(device)
+G_val=G_val.to(device)
+G_test=G_test.to(device)
 
 train_accs = []
 val_accs = []
@@ -385,46 +377,39 @@ for num_epoch in range(epochs):
     samples = torch.cat((torch.Tensor(edges), torch.Tensor(non_edges)), dim=0).type(torch.long).to(device)
     target = torch.cat((torch.ones(len(edges)), torch.zeros(len(non_edges))), dim=0).type(torch.long).to(device)
 
-    train_batcher = MiniBatcher(minibatch_size, len(samples)) if minibatch_size > 0 else MiniBatcher(len(samples),
-                                                                                                     len(samples))
-
     train_loss = 0
     y_pred = []
     y_true = []
+
     t_start = time.time()
-    for train_idxs in train_batcher.get_one_batch():
-        train_idxs = train_idxs
-        train_b_edges = samples[train_idxs].to(device)
-        train_b_target = target[train_idxs].to(device)
 
+    x_feature, edge_index = G_train.x, G_train.edge_index
+    x_feature=x_feature.to(device)
+    edge_index=edge_index.to(device)
+    gnn_optimizer.zero_grad()
+    # print("graph edgeindex: ",edge_index)
+    loss, pred = gnn_model.predict(x_feature, G_train, edge_index, samples, target)
 
-        x_feature, edge_index = G_train.x, G_train.edge_index
-      #  print("x_feature:", x_feature, x_feature.size())
-        x_feature=x_feature.to(device)
-        gnn_optimizer.zero_grad()
-        # print("graph edgeindex: ",edge_index)
-        loss, pred = gnn_model.predict(x_feature, G_train, train_b_edges, train_b_target)
+    loss.backward()
+    gnn_optimizer.step()
 
-        loss.backward()
-        gnn_optimizer.step()
+    train_loss += loss.item()
 
-        train_loss += loss.item()
+    pred = F.log_softmax(pred, dim=1)
+    pred = pred.detach().to("cpu").numpy()
+    pred = np.argmax(pred, axis=1)
 
-        pred = F.log_softmax(pred, dim=1)
-        pred = pred.detach().to("cpu").numpy()
-        pred = np.argmax(pred, axis=1)
-
-        y_pred = np.append(y_pred, pred)
-        y_true = np.append(y_true, train_b_target.detach().to("cpu").numpy())
+    y_pred = np.append(y_pred, pred)
+    y_true = np.append(y_true, target.detach().to("cpu").numpy())
 
     t_end = time.time()
-    #print("Minibatch time: ", t_end - t_start)
+    print("Minibatch time: ", t_end - t_start)
 
     train_acc = accuracy_score(y_true, y_pred)
     train_accs.append(train_acc)
     train_losses.append(train_loss)
 
-   # print("............................................", num_epoch, train_acc)
+    print("............................................", num_epoch, train_acc)
 
     val_loss, val_acc, _, _ = predict_model(gnn_model, G_val, small_samples, adj_val_corrupted, val_false_non_edges,
                                             val_false_edges)
@@ -433,7 +418,7 @@ for num_epoch in range(epochs):
 
     if val_acc > validation_acc:
         validation_acc = val_acc
-       # print("Saving model Validation accuracy: ", validation_acc)
+        print("Saving model Validation accuracy: ", validation_acc)
         # Save Model
         torch.save(gnn_model.state_dict(), gnn_best_model)
 
@@ -458,11 +443,12 @@ gnn_model.load_state_dict(torch.load(gnn_best_model))
 _, test_acc, test_micro, test_weighted = predict_model(gnn_model, G_test, small_samples, adj_test_corrupted,
                                                        test_false_non_edges, test_false_edges)
 
-print("Test Micro F1 Score: ", test_micro, "Test Weighted F1 Score: ", test_weighted, "Test Accuracy Score: ", test_acc)
+print("Test Micro F1 Score: ", test_micro)
+print("Test Weighted F1 Score: ", test_weighted)
+print("Test Accuracy Score: ", test_acc)
 
 # ## Scratch
 
 # In[ ]:
-
 
 
